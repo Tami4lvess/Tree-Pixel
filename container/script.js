@@ -2153,28 +2153,91 @@ let frameCount = 0,
   lastFpsTime = performance.now(),
   lastTime = performance.now();
 
-let firstFramePresented = false;
-function dismissLoadingScreen() {
-  const loadingScreen = document.getElementById("loading-screen");
+const waitForNextPaint = () =>
+  new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
 
-  if (!loadingScreen || loadingScreen.classList.contains("is-hidden")) {
-    return;
+const wait = (milliseconds) =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+function syncRendererSize() {
+  const width = containerW();
+  const height = containerH();
+
+  camera.aspect = width / height;
+  camera.updateProjectionMatrix();
+  applyViewOffset();
+  renderer.setSize(width, height);
+  renderer.setPixelRatio(isMobile ? 1 : Math.min(window.devicePixelRatio, 1.5));
+  lastAdaptiveDist = -1;
+}
+
+async function renderPreparedFrame(compileMaterials = false) {
+  controls.update();
+
+  if (compileMaterials && typeof renderer.compileAsync === "function") {
+    await renderer.compileAsync(scene, camera);
   }
 
-  window.clearTimeout(window.loadingSafetyTimer);
-  loadingScreen.classList.add("is-complete");
+  if (postProcessing) postProcessing.render();
+  else renderer.render(scene, camera);
 
-  window.setTimeout(() => {
-    loadingScreen.classList.add("is-hidden");
+  // Dá ao navegador dois ciclos de pintura para apresentar o quadro no canvas
+  // antes que a tela branca possa começar a desaparecer.
+  await waitForNextPaint();
+}
+
+async function prepareAndRevealScene() {
+  const loadingScreen = document.getElementById("loading-screen");
+
+  try {
+    // Compila todos os materiais e produz um quadro completo no tamanho
+    // inicial, ainda protegido pela tela de carregamento.
+    await renderPreparedFrame(true);
+    window.clearTimeout(window.loadingSafetyTimer);
+
+    if (loadingScreen) loadingScreen.classList.add("is-complete");
+    await wait(260);
+
+    // O body fixo usado durante o loading altera a altura útil em celulares.
+    // Primeiro liberamos o layout com o loader ainda opaco; depois ajustamos
+    // e renderizamos novamente. Assim o redimensionamento não deixa um canvas
+    // vazio visível entre o loading e a página.
     document.documentElement.classList.remove("is-loading");
     document.body.classList.remove("is-loading");
+    await waitForNextPaint();
 
-    loadingScreen.addEventListener(
-      "transitionend",
-      () => loadingScreen.remove(),
-      { once: true },
-    );
-  }, 400);
+    syncRendererSize();
+    await renderPreparedFrame(false);
+  } catch (error) {
+    console.error("Falha ao preparar o primeiro quadro 3D:", error);
+    window.clearTimeout(window.loadingSafetyTimer);
+
+    // Ainda tenta manter a cena visível caso a sincronização avançada não seja
+    // suportada por algum navegador, sem remover ou esconder o canvas.
+    document.documentElement.classList.remove("is-loading");
+    document.body.classList.remove("is-loading");
+    syncRendererSize();
+    await renderPreparedFrame(false);
+  }
+
+  startupReady = true;
+  if (shouldRender()) {
+    renderLoopPaused = false;
+    lastTime = performance.now();
+    renderer.setAnimationLoop(animate);
+  }
+
+  if (!loadingScreen) return;
+
+  loadingScreen.classList.add("is-hidden");
+
+  loadingScreen.addEventListener(
+    "transitionend",
+    () => loadingScreen.remove(),
+    { once: true },
+  );
 }
 
 // Controle de pausa do render loop. Quando pausado (modo ocioso,
@@ -2183,6 +2246,7 @@ function dismissLoadingScreen() {
 // destruir a cena, então a volta é instantânea e sem flicker.
 let tabVisible = document.visibilityState === "visible";
 let heroInView = true;
+let startupReady = false;
 
 function shouldRender() {
   return tabVisible && heroInView && !idleModeActive;
@@ -2196,6 +2260,7 @@ function pauseRenderLoop() {
 
 function resumeRenderLoop() {
   if (!renderLoopPaused) return;
+  if (!startupReady) return;
   if (!shouldRender()) return; // ainda há outro motivo para ficar pausado
   renderLoopPaused = false;
   lastTime = performance.now();
@@ -2224,14 +2289,8 @@ function animate() {
   if (postProcessing) postProcessing.render();
   else renderer.render(scene, camera);
 
-  if (!firstFramePresented) {
-    firstFramePresented = true;
-    // Espera o navegador apresentar o quadro antes de revelar a cena.
-    requestAnimationFrame(dismissLoadingScreen);
-  }
 }
-renderer.setAnimationLoop(animate);
-if (!tabVisible) pauseRenderLoop();
+void prepareAndRevealScene();
 
 // Pausa tudo quando a aba não está visível (troca de aba, minimizado etc.).
 document.addEventListener("visibilitychange", () => {
@@ -2277,12 +2336,7 @@ window.addEventListener("resize", () => {
   if (resizeRAF) return;
   resizeRAF = requestAnimationFrame(() => {
     resizeRAF = null;
-    camera.aspect = containerW() / containerH();
-    camera.updateProjectionMatrix();
-    applyViewOffset();
-    renderer.setSize(containerW(), containerH());
-    renderer.setPixelRatio(isMobile ? 1 : Math.min(window.devicePixelRatio, 1.5));
-    lastAdaptiveDist = -1;
+    syncRendererSize();
   });
 });
 
@@ -2383,14 +2437,66 @@ function animateTitleIntro() {
 }
 
 titleLetters.forEach((letter, index) => {
-  letter.addEventListener("pointerenter", () => {
+  letter.addEventListener("pointerenter", (event) => {
     if (reduceTitleMotion.matches) return;
+    if (event.pointerType === "touch") return;
 
     // No mouse, somente a letra realmente tocada reage.
     colorizeLetter(letter, colorOffset + index);
     colorOffset = (colorOffset + 1) % letterColors.length;
   });
 });
+
+// No celular, touchmove continua ligado ao elemento em que o gesto começou.
+// elementFromPoint identifica a letra que está realmente sob o dedo durante
+// todo o deslize, inclusive quando o gesto começou fora do título.
+let lastTouchedLetter = null;
+
+function colorizeLetterUnderFinger(touch) {
+  if (reduceTitleMotion.matches) return;
+
+  const touchedElement = document.elementFromPoint(touch.clientX, touch.clientY);
+  const letter = touchedElement?.closest?.(".letter");
+
+  if (!letter || !title.contains(letter)) {
+    lastTouchedLetter = null;
+    return;
+  }
+
+  if (letter === lastTouchedLetter) return;
+
+  const index = titleLetters.indexOf(letter);
+  if (index < 0) return;
+
+  lastTouchedLetter = letter;
+  colorizeLetter(letter, colorOffset + index);
+  colorOffset = (colorOffset + 1) % letterColors.length;
+}
+
+function handleTitleTouch(event) {
+  for (let index = 0; index < event.changedTouches.length; index++) {
+    colorizeLetterUnderFinger(event.changedTouches[index]);
+  }
+}
+
+if (isMobile) {
+  document.addEventListener("touchstart", handleTitleTouch, { passive: true });
+  document.addEventListener("touchmove", handleTitleTouch, { passive: true });
+  document.addEventListener(
+    "touchend",
+    () => {
+      lastTouchedLetter = null;
+    },
+    { passive: true },
+  );
+  document.addEventListener(
+    "touchcancel",
+    () => {
+      lastTouchedLetter = null;
+    },
+    { passive: true },
+  );
+}
 
 let titleIntroStarted = false;
 
