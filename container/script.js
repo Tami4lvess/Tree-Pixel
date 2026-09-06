@@ -2427,4 +2427,3 @@ if (!titleLoadingScreen || titleLoadingScreen.classList.contains("is-hidden")) {
     handleLoadingTransitionEnd
   );
 }
-

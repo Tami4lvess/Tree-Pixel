@@ -3,16 +3,6 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script>
-      try {
-        if (sessionStorage.getItem("monthly-colors-scene-ready") === "true") {
-          document.documentElement.classList.add("is-return-visit");
-          document.documentElement.classList.remove("is-loading");
-        }
-      } catch {
-        // Mantém o carregamento normal quando o storage estiver indisponível.
-      }
-    </script>
     <!-- Fontes importadas -->
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -35,7 +25,7 @@
           "three": "https://cdn.jsdelivr.net/npm/three@0.183.2/build/three.module.js",
           "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.183.2/build/three.webgpu.js",
           "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.183.2/build/three.tsl.js",
-          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.2/examples/jsm/"
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
         }
       }
     </script>
@@ -558,19 +548,14 @@
       }
     </script>
     <script>
-      // A animação 3D é progressiva: ela nunca pode prender a navegação.
-      // No celular, o fundo seguro e os controles aparecem quase de imediato;
-      // no desktop, a espera máxima também fica curta.
-      const maximumLoadingTime = window.matchMedia(
-        "(max-width: 820px), (pointer: coarse)"
-      ).matches ? 350 : 900;
-
+      // Evita prender o visitante na tela de carregamento caso WebGPU/WebGL
+      // seja bloqueado ou alguma dependência externa não responda.
       window.loadingSafetyTimer = window.setTimeout(() => {
         const loadingScreen = document.getElementById("loading-screen");
         loadingScreen?.classList.add("is-hidden");
         document.documentElement.classList.remove("is-loading");
         document.body.classList.remove("is-loading");
-      }, maximumLoadingTime);
+      }, 16000);
     </script>
     <script src="./language.js"></script>
     <script type="module" src="./script.js"></script>
